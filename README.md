@@ -327,6 +327,8 @@ Opened it to verify the accuracy of retrieval.
 
 Without reranking, FAISS returns images purely based on embedding similarity. In practice this may retrieve visually similar clothing that differs in color or garment type. The attribute-aware reranker promotes candidates matching explicit query constraints (e.g. color and garment category), leading to more precise top-ranked results.
 
+Also, OpenCLIP embeddings are L2-normalized before indexing. Therefore FAISS inner-product scores are cosine similarities ranging approximately from -1 to 1. For real-world retrieval tasks, scores between 0.2 and 0.4 are common and are primarily useful for ranking rather than absolute confidence.
+
 ---
 
 ## Limitations
