@@ -22,10 +22,10 @@ import time
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-import faiss
 import numpy as np
 import open_clip
 import torch
+import faiss
 
 from retriever.query_parser import build_vocab_patterns, parse_query
 from retriever.reranker import load_attributes, rerank_candidates
@@ -44,20 +44,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def get_device() -> torch.device:
-    """Select the Apple MPS device if available, otherwise fall back to CPU.
-
-    Returns:
-        The torch device to run the OpenCLIP model on.
-    """
-    if torch.backends.mps.is_available():
-        logger.info("MPS backend available - using Apple GPU.")
-        device = torch.device("mps")
-    else:
-        logger.info("MPS backend not available - using CPU.")
-        device = torch.device("cpu")
-    logger.info("Using device: %s", device)
-    return device
+def get_device():
+    logger.info("Using CPU.")
+    return torch.device("cpu")
 
 
 def load_clip_model(
@@ -168,51 +157,54 @@ def search_index(
     index: faiss.Index,
     image_paths: List[str],
     top_k: int,
-) -> List[str]:
-    """Search the FAISS index and convert the resulting indices into image paths.
+) -> List[Dict[str, object]]:
+    """Search the FAISS index and return candidate image paths with similarity scores."""
 
-    Args:
-        query_embedding: A unit-normalized 1-D query embedding.
-        index: The loaded FAISS IndexFlatIP.
-        image_paths: The ordered image paths list from :func:`load_image_paths`,
-            positionally aligned with the FAISS index.
-        top_k: Number of nearest neighbours to retrieve.
-
-    Returns:
-        A list of image paths for the top_k nearest neighbours, ordered by
-        descending cosine similarity.
-    """
     query_matrix = np.expand_dims(query_embedding, axis=0)
+
     effective_k = min(top_k, index.ntotal)
     if effective_k < top_k:
         logger.warning(
             "Requested top_k=%d exceeds index size (%d) - returning %d instead.",
-            top_k, index.ntotal, effective_k,
+            top_k,
+            index.ntotal,
+            effective_k,
         )
 
-   scores, indices = index.search(query_matrix, effective_k)
+    scores, indices = index.search(query_matrix, effective_k)
 
-    candidate_paths: List[str] = []
-    for position in indices[0]:
+    candidate_results: List[Dict[str, object]] = []
+
+    for position, similarity in zip(indices[0], scores[0]):
         if position == -1:
-            continue  # FAISS pads with -1 when fewer than k results exist
-        candidate_paths.append(image_paths[position])
+            continue
 
-    logger.info("FAISS search returned %d candidate(s).", len(candidate_paths))
-    return candidate_paths, scores[0]
+        candidate_results.append(
+            {
+                "image_path": image_paths[position],
+                "similarity": float(similarity),
+            }
+        )
 
+    logger.info(
+        "FAISS search returned %d candidate(s).",
+        len(candidate_results),
+    )
 
-def print_results(reranked_results: List[Dict[str, object]]) -> None:
-    """Print the final reranked results as a numbered list of image/score pairs.
+    return candidate_results
 
-    Args:
-        reranked_results: The list returned by rerank_candidates(), sorted
-            by descending attribute score.
-    """
-    for rank, result in enumerate(reranked_results, start=1):
+from pathlib import Path
+
+IMAGE_DIR = Path("data/raw")
+
+def print_results(reranked_results):
+    for rank, result in enumerate(reranked_results, 1):
+        image_path = IMAGE_DIR / result["image_path"]
+
         print(f"{rank}.")
-        print(f"   image: {result['image_path']}")
-        print(f"   score: {result['score']}")
+        print(f"   image: {image_path}")
+        print(f"   attribute score: {result['score']}")
+        print(f"   faiss similarity: {result['similarity']:.4f}")
 
 
 def main() -> None:
@@ -225,27 +217,74 @@ def main() -> None:
         logger.error("Query cannot be empty.")
         return
 
+    # print("\n========== DEBUG ==========")
+
+    print("1. get_device()")
     device = get_device()
+    # print("✓ get_device")
+
+    print("2. load_clip_model()")
     model, tokenizer = load_clip_model(device)
+    # print("✓ load_clip_model")
+
+    print("3. load_faiss_index()")
     index = load_faiss_index(FAISS_INDEX_PATH)
+    # print("✓ load_faiss_index")
+
+    print("4. load_image_paths()")
     image_paths = load_image_paths(IMAGE_PATHS_CSV_PATH)
+    # print("✓ load_image_paths")
+
+    print("5. load_attributes()")
     attributes_by_path = load_attributes(ATTRIBUTES_CSV_PATH)
+    # print("✓ load_attributes")
 
+    print("6. build_vocab_patterns()")
     query_patterns = build_vocab_patterns()
+    # print("✓ build_vocab_patterns")
+
+    print("7. parse_query()")
     parsed_query = parse_query(query_text, query_patterns)
+    # print("✓ parse_query")
 
-    query_embedding = encode_query(query_text, model, tokenizer, device)
-    candidate_paths = search_index(query_embedding, index, image_paths, TOP_K)
-    reranked_results = rerank_candidates(candidate_paths, parsed_query, attributes_by_path)
+    print("8. encode_query()")
+    query_embedding = encode_query(
+        query_text,
+        model,
+        tokenizer,
+        device,
+    )
+    print("✓ encode_query")
+    print(f"Embedding shape: {query_embedding.shape}")
+    print(f"Embedding dtype: {query_embedding.dtype}")
 
-    elapsed_seconds = time.monotonic() - start_time
+    print("9. search_index()")
+    candidate_results = search_index(
+        query_embedding,
+        index,
+        image_paths,
+        TOP_K,
+    )
+    print("✓ search_index")
 
+    print("10. rerank_candidates()")
+    reranked_results = rerank_candidates(
+        candidate_results,
+        parsed_query,
+        attributes_by_path,
+    )
+    # print("✓ rerank_candidates")
+
+    print("11. print_results()")
     print(f"\nParsed query: {parsed_query}")
-    print(f"Number of FAISS candidates: {len(candidate_paths)}\n")
+    print(f"Number of FAISS candidates: {len(candidate_results)}\n")
     print("Final reranked results:")
     print_results(reranked_results)
-    print(f"\nTotal execution time: {elapsed_seconds:.2f} seconds")
+    # print("✓ print_results")
 
+    elapsed_seconds = time.monotonic() - start_time
+    print(f"\nTotal execution time: {elapsed_seconds:.2f} seconds")
+    # print("========== FINISHED ==========")
 
 if __name__ == "__main__":
     main()
