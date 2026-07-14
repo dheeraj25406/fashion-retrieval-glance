@@ -1,14 +1,20 @@
-"""Orchestration layer for the fashion image retrieval pipeline.
+"""
+search.py
 
-Connects every previously built module into a single end-to-end text-to-
-image search: parses a natural-language query, encodes it with the same
-OpenCLIP text encoder used during indexing, searches the FAISS index for
-nearest-neighbour candidates, and reranks those candidates using structured
-attribute matching.
+Orchestration layer for the fashion image retrieval pipeline.
 
-This module does not rebuild the FAISS index, does not encode images, does
-not load captions.csv, and does not perform attribute extraction - all of
-that is handled by the indexer modules and by retriever/reranker.py.
+Runs the complete text-to-image search flow:
+    1. Parse user query into structured attributes.
+    2. Encode the original query using the OpenCLIP text encoder.
+    3. Retrieve nearest image candidates from the FAISS index.
+    4. Rerank candidates using attribute matching.
+
+This module only coordinates retrieval. Index creation, image encoding,
+caption generation, and attribute extraction are handled by the indexer
+modules and retriever/reranker.py.
+
+The FAISS index and image_paths.csv must remain aligned: FAISS position i
+corresponds to image_paths.csv row i.
 
 Usage:
     python3 -m retriever.search
@@ -35,6 +41,7 @@ PRETRAINED_TAG = "laion2b_s34b_b79k"
 FAISS_INDEX_PATH = Path("data/processed/faiss_index.bin")
 IMAGE_PATHS_CSV_PATH = Path("data/processed/image_paths.csv")
 ATTRIBUTES_CSV_PATH = Path("data/processed/attributes.csv")
+IMAGE_DIR = Path("data/raw")
 TOP_K = 20
 
 logging.basicConfig(
@@ -44,7 +51,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def get_device():
+def get_device() -> torch.device:
+    """
+    Return the inference device used by the retrieval pipeline.
+
+    Current implementation uses CPU execution for compatibility.
+    """
     logger.info("Using CPU.")
     return torch.device("cpu")
 
@@ -158,7 +170,17 @@ def search_index(
     image_paths: List[str],
     top_k: int,
 ) -> List[Dict[str, object]]:
-    """Search the FAISS index and return candidate image paths with similarity scores."""
+    """
+    Search the FAISS index and return nearest-neighbour candidates.
+    
+    The returned image paths are resolved through image_paths, whose ordering
+    must match the FAISS index ordering created during indexing.
+    
+    Returns:
+        A list of dictionaries containing:
+            - image_path: indexed image path
+            - similarity: FAISS similarity score
+    """
 
     query_matrix = np.expand_dims(query_embedding, axis=0)
 
@@ -193,11 +215,17 @@ def search_index(
 
     return candidate_results
 
-from pathlib import Path
 
-IMAGE_DIR = Path("data/raw")
 
-def print_results(reranked_results):
+def print_results(reranked_results: List[Dict[str, object]]) -> None:
+    """
+    Print final ranked retrieval results.
+    
+    Each result is expected to contain:
+        - image_path
+        - score (attribute matching score)
+        - similarity (FAISS similarity score)
+    """
     for rank, result in enumerate(reranked_results, 1):
         image_path = IMAGE_DIR / result["image_path"]
 
@@ -217,74 +245,54 @@ def main() -> None:
         logger.error("Query cannot be empty.")
         return
 
-    # print("\n========== DEBUG ==========")
 
-    print("1. get_device()")
     device = get_device()
-    # print("✓ get_device")
 
-    print("2. load_clip_model()")
     model, tokenizer = load_clip_model(device)
-    # print("✓ load_clip_model")
 
-    print("3. load_faiss_index()")
     index = load_faiss_index(FAISS_INDEX_PATH)
-    # print("✓ load_faiss_index")
 
-    print("4. load_image_paths()")
     image_paths = load_image_paths(IMAGE_PATHS_CSV_PATH)
-    # print("✓ load_image_paths")
 
-    print("5. load_attributes()")
     attributes_by_path = load_attributes(ATTRIBUTES_CSV_PATH)
-    # print("✓ load_attributes")
 
-    print("6. build_vocab_patterns()")
     query_patterns = build_vocab_patterns()
-    # print("✓ build_vocab_patterns")
 
-    print("7. parse_query()")
+    # Extract structured attributes for reranking while keeping the original
+    # query text unchanged for CLIP embedding.
     parsed_query = parse_query(query_text, query_patterns)
-    # print("✓ parse_query")
 
-    print("8. encode_query()")
     query_embedding = encode_query(
         query_text,
         model,
         tokenizer,
         device,
     )
-    print("✓ encode_query")
+    
     print(f"Embedding shape: {query_embedding.shape}")
     print(f"Embedding dtype: {query_embedding.dtype}")
 
-    print("9. search_index()")
     candidate_results = search_index(
         query_embedding,
         index,
         image_paths,
         TOP_K,
     )
-    print("✓ search_index")
 
-    print("10. rerank_candidates()")
     reranked_results = rerank_candidates(
         candidate_results,
         parsed_query,
         attributes_by_path,
     )
-    # print("✓ rerank_candidates")
 
-    print("11. print_results()")
     print(f"\nParsed query: {parsed_query}")
     print(f"Number of FAISS candidates: {len(candidate_results)}\n")
     print("Final reranked results:")
     print_results(reranked_results)
-    # print("✓ print_results")
 
     elapsed_seconds = time.monotonic() - start_time
     print(f"\nTotal execution time: {elapsed_seconds:.2f} seconds")
-    # print("========== FINISHED ==========")
+
 
 if __name__ == "__main__":
     main()
