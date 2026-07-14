@@ -1,0 +1,11 @@
+torch
+torchvision
+transformers
+open_clip_torch
+faiss-cpu
+Pillow
+pandas
+numpy
+tqdm
+sentence-transformers
+accelerate
